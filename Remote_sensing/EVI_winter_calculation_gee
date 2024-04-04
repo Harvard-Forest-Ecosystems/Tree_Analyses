@@ -1,0 +1,131 @@
+// imports
+var geometry = 
+    /* color: #0b4a8b */
+    /* shown: false */
+    /* displayProperties: [
+      {
+        "type": "rectangle"
+      }
+    ] */
+    ee.Geometry.Polygon(
+        [[[-72.19474413070795, 42.55559484879985],
+          [-72.19474413070795, 42.53131183125247],
+          [-72.15869524154779, 42.53131183125247],
+          [-72.15869524154779, 42.55559484879985]]], null, false);
+
+
+// load in landsat 7
+var dataset = ee.ImageCollection('LANDSAT/LE07/C02/T1_L2')
+    // include all years
+    .filterDate('1999-06-01', '2021-09-01')
+    // clip to bounding box around the forest
+    .filterBounds(geometry);
+
+// Applies scaling factors.
+function applyScaleFactors(image) {
+  var opticalBands = image.select('SR_B.').multiply(0.0000275).add(-0.2);
+  var thermalBand = image.select('ST_B6').multiply(0.00341802).add(149.0);
+  return image.addBands(opticalBands, null, true)
+              .addBands(thermalBand, null, true);
+}
+
+dataset = dataset.map(applyScaleFactors);
+
+// Cloud filter data
+//var filtered = dataset.filter(ee.Filter.lessThan('CLOUD_COVER', 26));
+// remove data where cloud cover wasn't calculated
+var filtered = dataset.filter(ee.Filter.neq('CLOUD_COVER', -1));
+
+// filter to high image quality
+var filtered_im = filtered.filter(ee.Filter.greaterThan('IMAGE_QUALITY', 7));
+
+// remove clouds on a pixel level
+// function to extract bits
+// cite: https://spatialthoughts.com/2021/08/19/qa-bands-bitmasks-gee/
+var bitwiseExtract = function(input, fromBit, toBit) {
+  var maskSize = ee.Number(1).add(toBit).subtract(fromBit)
+  var mask = ee.Number(1).leftShift(maskSize).subtract(1)
+  return input.rightShift(fromBit).bitwiseAnd(mask)
+}
+
+// Extract bits and filter
+function removeclouds(image){
+  var cloud_index = image.select('QA_PIXEL');
+  var sat_index = image.select('QA_RADSAT');
+  // remove pixels thought to be clouds/shadows
+  var cloudmask = bitwiseExtract(cloud_index, 3,3).eq(0)
+  var shadowmask = bitwiseExtract(cloud_index, 4,4).eq(0)
+  var snowmask = bitwiseExtract(cloud_index, 5,5).eq(0)
+  // remove pixels with low cloud confidence
+  //var qaMask = bitwiseExtract(cloud_index, 8,9).eq(01)
+
+  // masked areas with saturated band 4s or 5s
+  var band1mask = bitwiseExtract(sat_index, 0,0).eq(0);
+  var band4mask = bitwiseExtract(sat_index, 3,3).eq(0);
+  var band3mask = bitwiseExtract(sat_index, 2,2).eq(0);
+  // combine to create mask
+  var mask = cloudmask.and(shadowmask).and(snowmask).and(band1mask).and(band3mask).and(band4mask)
+  // add mask to image
+  var masked_image = image.updateMask(mask)  
+  return masked_image
+}
+
+// apply function to image collection with map
+var cloud_filter_data = dataset.map(removeclouds)
+// Seems to work!
+
+//EVI = 2.5 * ((Band 4 – Band 3) / (Band 4 + 6 * Band 3 – 7.5 * Band 1 + 1)).
+
+// now create a function that clips image and calculates evi
+function calculateevi(image){
+  // crop image to geometry
+  var filt_clip = image.clip(geometry);
+  
+  // calculate evi
+  var evi = image.expression(
+    '2.5 * ((NIR - RED) / (NIR + 6 * RED - 7.5 * BLUE + 1))', {
+      'NIR': image.select('SR_B4'),
+      'RED': image.select('SR_B3'),
+      'BLUE': image.select('SR_B1')
+}).rename('EVI');
+  var evi_image = filt_clip.addBands(evi);
+  // return image with evi
+  return evi_image
+}
+
+// Calculate evi for filtered image collection
+var evi_data = cloud_filter_data.map(calculateevi)
+
+// find mean evi for each year
+var createYearlyImage=function(year){
+   var nextyear = ee.Number(year).add(ee.Number(1));
+   var startDate=ee.Date.fromYMD(year, 11, 1);
+   var endDate=ee.Date.fromYMD(nextyear, 3, 1);
+   var yearFiltered=evi_data.filterDate(startDate, endDate);
+   var total = yearFiltered.select('EVI');
+   var total2=total.mean();
+   return total2.set({
+       'year': year,
+       "system:id":year
+   });
+};
+
+// make list of years
+var years=ee.List.sequence(1999, 2020);
+
+// create image collection with annual evi
+var evi_annual=years.map(createYearlyImage);
+
+var yearCollection=ee.ImageCollection.fromImages(evi_annual);
+print(yearCollection);
+
+// EPSG:32618
+// try to export again
+var batch = require('users/fitoprincipe/geetools:batch')
+
+batch.Download.ImageCollection.toDrive(yearCollection, 'EVI_99_20_WINTER_2', 
+                {scale: 30, 
+                region: geometry,
+                 type: 'float',
+                 name: '{system:id}'
+                })
