@@ -1,5 +1,21 @@
 // You can also load in landsat 7 data and update years for more current EVI data
 
+// imports
+var geometry = 
+    /* color: #0b4a8b */
+    /* shown: false */
+    /* displayProperties: [
+      {
+        "type": "rectangle"
+      }
+    ] */
+    ee.Geometry.Polygon(
+        [[[-72.19474413070795, 42.55559484879985],
+          [-72.19474413070795, 42.53131183125247],
+          [-72.15869524154779, 42.53131183125247],
+          [-72.15869524154779, 42.55559484879985]]], null, false);
+
+
 // load in landsat 5
 var dataset = ee.ImageCollection('LANDSAT/LT05/C02/T1_L2')
     // include all years
